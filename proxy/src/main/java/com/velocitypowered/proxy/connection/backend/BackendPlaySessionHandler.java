@@ -69,6 +69,9 @@ import com.velocitypowered.proxy.protocol.packet.TransferPacket;
 import com.velocitypowered.proxy.protocol.packet.UpsertPlayerInfoPacket;
 import com.velocitypowered.proxy.protocol.packet.chat.ComponentHolder;
 import com.velocitypowered.proxy.protocol.packet.config.StartUpdatePacket;
+import com.velocitypowered.proxy.protocol.packet.scoreboard.ScoreboardPeekPacket;
+import com.velocitypowered.proxy.protocol.packet.scoreboard.SetObjectivePacket;
+import com.velocitypowered.proxy.protocol.packet.scoreboard.SetPlayerTeamPacket;
 import com.velocitypowered.proxy.protocol.util.DeferredByteBufHolder;
 import com.velocitypowered.proxy.protocol.util.PluginMessageUtil;
 import io.netty.buffer.ByteBuf;
@@ -77,6 +80,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.handler.timeout.ReadTimeoutException;
 import java.net.InetSocketAddress;
+import java.util.Set;
 import java.util.regex.Pattern;
 import net.kyori.adventure.key.Key;
 import org.apache.logging.log4j.LogManager;
@@ -148,6 +152,19 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
     return false;
   }
 
+  // Srino: what this backend creates on the client that a seamless switch has to remove again.
+  @Override
+  public boolean handle(SetObjectivePacket packet) {
+    track(serverConn.getPlayer().seamlessSwitch().objectives(), packet);
+    return false;
+  }
+
+  @Override
+  public boolean handle(SetPlayerTeamPacket packet) {
+    track(serverConn.getPlayer().seamlessSwitch().teams(), packet);
+    return false;
+  }
+
   @Override
   public boolean handle(StartUpdatePacket packet) {
     MinecraftConnection smc = serverConn.ensureConnected();
@@ -193,6 +210,10 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
       } else if (packet.getAction() == BossBarPacket.REMOVE) {
         playerSessionHandler.getServerBossBars().remove(packet.getUuid());
       }
+    } else if (packet.getAction() == BossBarPacket.ADD) {
+      serverConn.getPlayer().seamlessSwitch().bossBars().add(packet.getUuid());
+    } else if (packet.getAction() == BossBarPacket.REMOVE) {
+      serverConn.getPlayer().seamlessSwitch().bossBars().remove(packet.getUuid());
     }
     return false; // forward
   }
@@ -464,6 +485,8 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
   public void handleGeneric(MinecraftPacket packet) {
     if (packet instanceof PluginMessagePacket pluginMessage) {
       pluginMessage.retain();
+    } else if (packet instanceof ScoreboardPeekPacket scoreboardPacket) {
+      scoreboardPacket.retain();
     }
     boolean huge = packet instanceof DeferredByteBufHolder def && def.content().readableBytes() > LARGE_PACKET_THRESHOLD;
     playerConnection.delayedWrite(packet);
@@ -529,5 +552,13 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
     }
 
     playerConnection.setAutoReading(writable);
+  }
+
+  private static void track(Set<String> names, ScoreboardPeekPacket packet) {
+    if (packet.getMode() == ScoreboardPeekPacket.MODE_ADD) {
+      names.add(packet.getName());
+    } else if (packet.getMode() == ScoreboardPeekPacket.MODE_REMOVE) {
+      names.remove(packet.getName());
+    }
   }
 }

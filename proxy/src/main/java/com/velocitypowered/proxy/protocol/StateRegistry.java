@@ -118,6 +118,8 @@ import com.velocitypowered.proxy.protocol.packet.config.KnownPacksPacket;
 import com.velocitypowered.proxy.protocol.packet.config.RegistrySyncPacket;
 import com.velocitypowered.proxy.protocol.packet.config.StartUpdatePacket;
 import com.velocitypowered.proxy.protocol.packet.config.TagsUpdatePacket;
+import com.velocitypowered.proxy.protocol.packet.scoreboard.SetObjectivePacket;
+import com.velocitypowered.proxy.protocol.packet.scoreboard.SetPlayerTeamPacket;
 import com.velocitypowered.proxy.protocol.packet.title.LegacyTitlePacket;
 import com.velocitypowered.proxy.protocol.packet.title.TitleActionbarPacket;
 import com.velocitypowered.proxy.protocol.packet.title.TitleClearPacket;
@@ -446,6 +448,31 @@ public enum StateRegistry {
           map(0x0B, MINECRAFT_1_19_4, false),
           map(0x0A, MINECRAFT_1_20_2, false),
           map(0x09, MINECRAFT_1_21_5, false));
+      // Srino: tracked so a seamless server switch can remove the old server's objectives and teams
+      clientbound.register(
+          SetObjectivePacket.class,
+          SetObjectivePacket::new,
+          map(0x64, MINECRAFT_1_21_4, false),
+          map(0x63, MINECRAFT_1_21_5, false),
+          map(0x68, MINECRAFT_1_21_9, false),
+          map(0x6A, MINECRAFT_26_1, false),
+          map(0x6C, MINECRAFT_26_3, false));
+      clientbound.register(
+          SetPlayerTeamPacket.class,
+          SetPlayerTeamPacket::new,
+          map(0x67, MINECRAFT_1_21_4, false),
+          map(0x66, MINECRAFT_1_21_5, false),
+          map(0x6B, MINECRAFT_1_21_9, false),
+          map(0x6D, MINECRAFT_26_1, false),
+          map(0x6F, MINECRAFT_26_3, false));
+      // Srino: encode only, sends tags from a skipped configuration after a seamless switch
+      clientbound.register(
+          TagsUpdatePacket.class,
+          TagsUpdatePacket::new,
+          map(0x7F, MINECRAFT_1_21_4, true),
+          map(0x84, MINECRAFT_1_21_9, true),
+          map(0x86, MINECRAFT_26_1, true),
+          map(0x89, MINECRAFT_26_3, true));
       clientbound.register(
           LegacyChatPacket.class,
           LegacyChatPacket::new,

@@ -175,6 +175,10 @@ public class ClientConfigSessionHandler implements MinecraftSessionHandler {
 
   @Override
   public boolean handle(KnownPacksPacket packet) {
+    if (player.seamlessSwitch().onClientKnownPacksResponse(packet)) {
+      // Srino: the proxy already answered the backend during a seamless switch attempt.
+      return true;
+    }
     callConfigurationEvent().thenRun(() -> {
       VelocityServerConnection targetServer =
           player.getConnectionInFlightOrConnectedServer();

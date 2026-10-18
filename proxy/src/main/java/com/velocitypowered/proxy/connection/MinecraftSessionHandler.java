@@ -81,6 +81,8 @@ import com.velocitypowered.proxy.protocol.packet.config.KnownPacksPacket;
 import com.velocitypowered.proxy.protocol.packet.config.RegistrySyncPacket;
 import com.velocitypowered.proxy.protocol.packet.config.StartUpdatePacket;
 import com.velocitypowered.proxy.protocol.packet.config.TagsUpdatePacket;
+import com.velocitypowered.proxy.protocol.packet.scoreboard.SetObjectivePacket;
+import com.velocitypowered.proxy.protocol.packet.scoreboard.SetPlayerTeamPacket;
 import com.velocitypowered.proxy.protocol.packet.title.LegacyTitlePacket;
 import com.velocitypowered.proxy.protocol.packet.title.TitleActionbarPacket;
 import com.velocitypowered.proxy.protocol.packet.title.TitleClearPacket;
@@ -139,6 +141,14 @@ public interface MinecraftSessionHandler {
   }
 
   default boolean handle(BossBarPacket packet) {
+    return false;
+  }
+
+  default boolean handle(SetObjectivePacket packet) {
+    return false;
+  }
+
+  default boolean handle(SetPlayerTeamPacket packet) {
     return false;
   }
 

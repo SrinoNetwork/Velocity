@@ -160,6 +160,11 @@ log-player-connections = true
 # Transfer packet (Minecraft 1.20.5) to be received.
 accepts-transfers = false
 
+# Srino: keeps 1.21.4+ clients in the play state when they switch servers, so there is no
+# "Reconfiguring" screen. Only used when the target server sends the same registries the
+# client already has; otherwise the normal reconfiguration runs.
+seamless-server-switch = false
+
 # Enables support for SO_REUSEPORT. This may help the proxy scale better on multicore systems
 # with a lot of incoming connections, and provide better CPU utilization than the existing
 # strategy of having a single thread accepting connections and distributing them to worker

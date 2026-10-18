@@ -72,6 +72,8 @@ import com.velocitypowered.proxy.protocol.packet.chat.session.SessionCommandHand
 import com.velocitypowered.proxy.protocol.packet.chat.session.SessionPlayerChatPacket;
 import com.velocitypowered.proxy.protocol.packet.chat.session.SessionPlayerCommandPacket;
 import com.velocitypowered.proxy.protocol.packet.config.FinishedUpdatePacket;
+import com.velocitypowered.proxy.protocol.packet.scoreboard.SetObjectivePacket;
+import com.velocitypowered.proxy.protocol.packet.scoreboard.SetPlayerTeamPacket;
 import com.velocitypowered.proxy.protocol.packet.title.GenericTitlePacket;
 import com.velocitypowered.proxy.protocol.util.PluginMessageUtil;
 import com.velocitypowered.proxy.util.CharacterUtil;
@@ -634,6 +636,64 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
   }
 
   /**
+   * Srino: whether the next switch may try to keep the client in the play state.
+   */
+  public boolean canSwitchSeamlessly() {
+    return server.getConfiguration().isSeamlessServerSwitch()
+        && spawned
+        && player.getProtocolVersion().noLessThan(ProtocolVersion.MINECRAFT_1_21_4)
+        && player.seamlessSwitch().clientFingerprint() != null;
+  }
+
+  /**
+   * Srino: like {@link #doSwitch()}, but the client stays in the play state while the new backend
+   * is configured by the proxy.
+   */
+  public void doSeamlessSwitch() {
+    final VelocityServerConnection existingConnection = player.getConnectedServer();
+    if (existingConnection != null) {
+      player.setConnectedServer(null);
+      existingConnection.disconnect();
+      player.sendKeepAlive();
+    }
+  }
+
+  /**
+   * Srino: the new backend's registries differ from the client's, so the client is reconfigured
+   * after all.
+   *
+   * @return a future that completes when the client is in the configuration state
+   */
+  public CompletableFuture<Void> startSeamlessFallback() {
+    spawned = false;
+    player.clearPlayerListHeaderAndFooterSilent();
+    player.getTabList().clearAllSilent();
+    player.getBossBarManager().dropPackets();
+    player.switchToConfigState();
+    return configSwitchFuture;
+  }
+
+  /**
+   * Srino: removes what the previous backend created that survives a switch in the play state.
+   */
+  private void removeSeamlessLeftovers() {
+    final SeamlessSwitchState state = player.seamlessSwitch();
+    for (String objective : state.objectives()) {
+      player.getConnection().delayedWrite(SetObjectivePacket.remove(objective));
+    }
+    for (String team : state.teams()) {
+      player.getConnection().delayedWrite(SetPlayerTeamPacket.remove(team));
+    }
+    for (UUID bossBar : state.bossBars()) {
+      BossBarPacket deletePacket = new BossBarPacket();
+      deletePacket.setUuid(bossBar);
+      deletePacket.setAction(BossBarPacket.REMOVE);
+      player.getConnection().delayedWrite(deletePacket);
+    }
+    state.clearClientLeftovers();
+  }
+
+  /**
    * Handles the {@code JoinGame} packet. This function is responsible for handling the client-side
    * switching servers in Velocity.
    *
@@ -642,6 +702,7 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
    */
   public void handleBackendJoinGame(JoinGamePacket joinGame, VelocityServerConnection destination) {
     final MinecraftConnection serverMc = destination.ensureConnected();
+    final List<MinecraftPacket> seamlessDeferred = player.seamlessSwitch().takeDeferredForJoin();
 
     if (!spawned) {
       // The player wasn't spawned in yet, so we don't need to do anything special. Just send
@@ -653,6 +714,9 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
     } else {
       // Clear tab list to avoid duplicate entries
       player.getTabList().clearAll();
+      if (seamlessDeferred != null) {
+        removeSeamlessLeftovers();
+      }
 
       // The player is switching from a server already, so we need to tell the client to change
       // entity IDs and send new dimension information.
@@ -665,7 +729,10 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
 
     destination.setEntityId(joinGame.getEntityId()); // used for sound api
     if (player.getProtocolVersion().noLessThan(ProtocolVersion.MINECRAFT_1_20_2)) {
-      player.getBossBarManager().sendBossBars();
+      // After a seamless switch the client still shows the proxy's boss bars.
+      if (seamlessDeferred == null) {
+        player.getBossBarManager().sendBossBars();
+      }
     } else {
       // Remove previous boss bars. These don't get cleared when sending JoinGame (up until 1.20.2),
       // thus the need to track them.
@@ -703,6 +770,13 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
       player.getConnection().delayedWrite(
           GenericTitlePacket.constructTitlePacket(GenericTitlePacket.ActionType.RESET,
               player.getProtocolVersion()));
+    }
+
+    // Srino: what the skipped configuration had for the client (tags, brand, plugin messages).
+    if (seamlessDeferred != null) {
+      for (MinecraftPacket packet : seamlessDeferred) {
+        player.getConnection().delayedWrite(packet);
+      }
     }
 
     // Flush everything

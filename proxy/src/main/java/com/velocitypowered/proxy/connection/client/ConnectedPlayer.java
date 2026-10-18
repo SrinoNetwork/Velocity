@@ -201,6 +201,7 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   private volatile ChatQueue chatQueue;
   private final ChatBuilderFactory chatBuilderFactory;
   private final BossBarManager bossBarManager;
+  private final SeamlessSwitchState seamlessSwitchState = new SeamlessSwitchState();
 
   ConnectedPlayer(VelocityServer server, GameProfile profile, MinecraftConnection connection,
                   @Nullable InetSocketAddress virtualHost, @Nullable String rawVirtualHost, boolean onlineMode,
@@ -1368,6 +1369,7 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
           }
           connection.write(StartUpdatePacket.INSTANCE);
           connection.pendingConfigurationSwitch = true;
+          seamlessSwitchState.clearClientLeftovers();
           connection.getChannel().pipeline().get(MinecraftEncoder.class).setState(StateRegistry.CONFIG);
           // Make sure we don't send any play packets to the player after update start
           connection.addPlayPacketQueueOutboundHandler();
@@ -1418,6 +1420,13 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   @Override
   public HandshakeIntent getHandshakeIntent() {
     return handshakeIntent;
+  }
+
+  /**
+   * Srino: state for switching servers without reconfiguring the client.
+   */
+  public SeamlessSwitchState seamlessSwitch() {
+    return seamlessSwitchState;
   }
 
   public BossBarManager getBossBarManager() {
