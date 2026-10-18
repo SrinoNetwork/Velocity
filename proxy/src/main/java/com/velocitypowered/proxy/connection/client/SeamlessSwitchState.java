@@ -30,8 +30,10 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
@@ -142,8 +144,12 @@ public final class SeamlessSwitchState {
    */
   public static final class Fingerprint {
 
+    private static final byte[] NO_DATA = new byte[0];
+
     private @Nullable List<KnownPacksPacket.KnownPack> knownPacks;
-    private final TreeMap<String, byte[]> registries = new TreeMap<>();
+    // registry id -> entry id -> hash of the entry's data (empty when the entry has none), in
+    // packet order, because the order gives the entries their network ids
+    private final TreeMap<String, LinkedHashMap<String, byte[]>> registries = new TreeMap<>();
     private @Nullable Set<Key> features;
 
     public void knownPacks(List<KnownPacksPacket.KnownPack> packs) {
@@ -161,35 +167,37 @@ public final class SeamlessSwitchState {
     public void registry(ByteBuf content) {
       ByteBuf peek = content.duplicate();
       String id = ProtocolUtils.readString(peek);
-      byte[] hash;
+      LinkedHashMap<String, byte[]> entries;
       try {
-        hash = canonicalRegistryHash(peek);
+        entries = readEntries(peek);
       } catch (RuntimeException | IOException e) {
         // Unknown layout: raw bytes still work, they only make a match less likely.
-        hash = sha256(content);
+        entries = new LinkedHashMap<>();
+        entries.put("<raw>", sha256(content));
       }
-      registries.put(id, hash);
+      registries.put(id, entries);
     }
 
-    private static byte[] canonicalRegistryHash(ByteBuf buf) throws IOException {
-      MessageDigest digest = newDigest();
-      try (DataOutputStream out = new DataOutputStream(
-          new DigestOutputStream(OutputStream.nullOutputStream(), digest))) {
-        int entries = ProtocolUtils.readVarInt(buf);
-        out.writeInt(entries);
-        for (int i = 0; i < entries; i++) {
-          out.writeUTF(ProtocolUtils.readString(buf));
-          boolean hasData = buf.readBoolean();
-          out.writeBoolean(hasData);
-          if (hasData) {
+    private static LinkedHashMap<String, byte[]> readEntries(ByteBuf buf) throws IOException {
+      LinkedHashMap<String, byte[]> entries = new LinkedHashMap<>();
+      int count = ProtocolUtils.readVarInt(buf);
+      for (int i = 0; i < count; i++) {
+        String entry = ProtocolUtils.readString(buf);
+        byte[] hash = NO_DATA;
+        if (buf.readBoolean()) {
+          MessageDigest digest = newDigest();
+          try (DataOutputStream out = new DataOutputStream(
+              new DigestOutputStream(OutputStream.nullOutputStream(), digest))) {
             writeCanonical(ProtocolUtils.readBinaryTag(buf, ProtocolVersion.MINECRAFT_1_21_4, null), out);
           }
+          hash = digest.digest();
         }
-        if (buf.isReadable()) {
-          throw new IOException("trailing bytes");
-        }
+        entries.put(entry, hash);
       }
-      return digest.digest();
+      if (buf.isReadable()) {
+        throw new IOException("trailing bytes");
+      }
+      return entries;
     }
 
     @SuppressWarnings("unchecked")
@@ -219,7 +227,8 @@ public final class SeamlessSwitchState {
     }
 
     /**
-     * Returns the ids of the registries that differ, empty when both match.
+     * Describes what differs (registry ids with up to a few entries: + only here, - only there,
+     * ~ other data, order = same entries in another order), empty when both match.
      */
     public Set<String> diff(Fingerprint other) {
       Set<String> differing = new LinkedHashSet<>();
@@ -232,10 +241,33 @@ public final class SeamlessSwitchState {
       Set<String> ids = new TreeSet<>(registries.keySet());
       ids.addAll(other.registries.keySet());
       for (String id : ids) {
-        byte[] a = registries.get(id);
-        byte[] b = other.registries.get(id);
-        if (a == null || b == null || !Arrays.equals(a, b)) {
-          differing.add(id);
+        LinkedHashMap<String, byte[]> a = registries.get(id);
+        LinkedHashMap<String, byte[]> b = other.registries.get(id);
+        if (a == null || b == null) {
+          differing.add(id + (a == null ? " (missing here)" : " (missing there)"));
+          continue;
+        }
+        List<String> details = new ArrayList<>();
+        for (Map.Entry<String, byte[]> e : a.entrySet()) {
+          byte[] there = b.get(e.getKey());
+          if (there == null) {
+            details.add("+" + e.getKey());
+          } else if (!Arrays.equals(e.getValue(), there)) {
+            details.add("~" + e.getKey());
+          }
+        }
+        for (String key : b.keySet()) {
+          if (!a.containsKey(key)) {
+            details.add("-" + key);
+          }
+        }
+        if (details.isEmpty() && !new ArrayList<>(a.keySet()).equals(new ArrayList<>(b.keySet()))) {
+          details.add("order");
+        }
+        if (!details.isEmpty()) {
+          int shown = Math.min(details.size(), 6);
+          differing.add(id + " [" + String.join(" ", details.subList(0, shown))
+              + (details.size() > shown ? " +" + (details.size() - shown) + " more" : "") + "]");
         }
       }
       return differing;
