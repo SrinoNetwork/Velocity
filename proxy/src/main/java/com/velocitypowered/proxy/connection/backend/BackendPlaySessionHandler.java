@@ -41,6 +41,7 @@ import com.velocitypowered.proxy.connection.MinecraftConnection;
 import com.velocitypowered.proxy.connection.MinecraftSessionHandler;
 import com.velocitypowered.proxy.connection.client.ClientPlaySessionHandler;
 import com.velocitypowered.proxy.connection.client.ConnectedPlayer;
+import com.velocitypowered.proxy.connection.client.SeamlessPacketIds;
 import com.velocitypowered.proxy.connection.player.resourcepack.VelocityResourcePackInfo;
 import com.velocitypowered.proxy.connection.player.resourcepack.handler.ResourcePackHandler;
 import com.velocitypowered.proxy.connection.util.ConnectionMessages;
@@ -63,6 +64,7 @@ import com.velocitypowered.proxy.protocol.packet.RemovePlayerInfoPacket;
 import com.velocitypowered.proxy.protocol.packet.RemoveResourcePackPacket;
 import com.velocitypowered.proxy.protocol.packet.ResourcePackRequestPacket;
 import com.velocitypowered.proxy.protocol.packet.ResourcePackResponsePacket;
+import com.velocitypowered.proxy.protocol.packet.RespawnPacket;
 import com.velocitypowered.proxy.protocol.packet.ServerDataPacket;
 import com.velocitypowered.proxy.protocol.packet.TabCompleteResponsePacket;
 import com.velocitypowered.proxy.protocol.packet.TransferPacket;
@@ -85,6 +87,7 @@ import java.util.regex.Pattern;
 import net.kyori.adventure.key.Key;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
  * Handles a connected player.
@@ -106,6 +109,8 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
   private final BungeeCordMessageResponder bungeecordMessageResponder;
   private boolean exceptionTriggered = false;
   private int packetsFlushed;
+  // Srino: set when switches without loading screen are on and the client version is known
+  private final @Nullable SeamlessPacketIds seamlessIds;
 
   BackendPlaySessionHandler(VelocityServer server, VelocityServerConnection serverConn) {
     this.server = server;
@@ -121,6 +126,9 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
 
     this.bungeecordMessageResponder = new BungeeCordMessageResponder(server,
         serverConn.getPlayer());
+    this.seamlessIds = server.getConfiguration().isSeamlessServerSwitch()
+        && server.getConfiguration().isSeamlessNoLoadingScreen()
+        ? SeamlessPacketIds.forVersion(playerConnection.getProtocolVersion()) : null;
   }
 
   @Override
@@ -186,6 +194,13 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
   public boolean handle(JoinGamePacket packet) {
     // We receive this if the connection is reconfigured
     packet.setOnlineMode(serverConn.getPlayer().isOnlineMode());
+    serverConn.getPlayer().seamlessSwitch().onClientJoinGame(packet);
+    return false; // forward
+  }
+
+  @Override
+  public boolean handle(RespawnPacket packet) {
+    serverConn.getPlayer().seamlessSwitch().onClientRespawn(packet);
     return false; // forward
   }
 
@@ -498,6 +513,9 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
 
   @Override
   public void handleUnknown(ByteBuf buf) {
+    if (seamlessIds != null) {
+      serverConn.getPlayer().seamlessSwitch().trackClientbound(buf, seamlessIds);
+    }
     boolean huge = buf.readableBytes() > LARGE_PACKET_THRESHOLD;
     playerConnection.delayedWrite(buf.retain());
     if (huge || ++packetsFlushed >= MAXIMUM_PACKETS_TO_FLUSH) {

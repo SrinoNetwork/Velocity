@@ -165,6 +165,12 @@ accepts-transfers = false
 # client already has; otherwise the normal reconfiguration runs.
 seamless-server-switch = false
 
+# Srino: on top of seamless-server-switch, also skips the "Loading terrain" screen: the proxy
+# sends neither JoinGame nor Respawn and removes the old server's chunks, entities and effects
+# itself. Needs the same player entity id on both servers (SparklySlimePaper
+# stable-player-entity-ids) and the same dimension; otherwise the normal switch runs.
+seamless-no-loading-screen = false
+
 # Enables support for SO_REUSEPORT. This may help the proxy scale better on multicore systems
 # with a lot of incoming connections, and provide better CPU utilization than the existing
 # strategy of having a single thread accepting connections and distributing them to worker

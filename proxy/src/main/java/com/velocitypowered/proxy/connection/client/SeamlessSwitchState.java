@@ -18,18 +18,25 @@
 package com.velocitypowered.proxy.connection.client;
 
 import com.velocitypowered.api.network.ProtocolVersion;
+import com.velocitypowered.proxy.connection.registry.DimensionInfo;
 import com.velocitypowered.proxy.protocol.MinecraftPacket;
 import com.velocitypowered.proxy.protocol.ProtocolUtils;
+import com.velocitypowered.proxy.protocol.packet.JoinGamePacket;
+import com.velocitypowered.proxy.protocol.packet.RespawnPacket;
 import com.velocitypowered.proxy.protocol.packet.config.KnownPacksPacket;
 import io.netty.buffer.ByteBuf;
+import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -136,6 +143,191 @@ public final class SeamlessSwitchState {
     objectives.clear();
     teams.clear();
     bossBars.clear();
+  }
+
+  // Srino: what the client holds right now, for a switch that sends neither JoinGame nor Respawn
+  // (both open the client's loading screen). Updated on the player's event loop only.
+
+  private int clientEntityId = Integer.MIN_VALUE;
+  private @Nullable ClientSpawn clientSpawn;
+  private final LongOpenHashSet chunks = new LongOpenHashSet();
+  private final IntOpenHashSet entities = new IntOpenHashSet();
+  private final IntOpenHashSet effects = new IntOpenHashSet();
+  // waypoint identifier bytes -> the waypoint as the backend sent it last
+  private final Map<ByteBuffer, byte[]> waypoints = new HashMap<>();
+
+  /**
+   * The world the client is in: two backends with the same spawn and the same entity id for the
+   * player can be switched without JoinGame.
+   *
+   * @param dimensionType dimension type registry id
+   * @param levelName     dimension key, e.g. minecraft:overworld
+   * @param flat          flat world (sky)
+   * @param debug         debug world
+   * @param seaLevel      sea level
+   * @param hardcore      hardcore hearts
+   */
+  public record ClientSpawn(int dimensionType, @Nullable String levelName, boolean flat,
+      boolean debug, int seaLevel, boolean hardcore) {
+
+    static ClientSpawn of(JoinGamePacket joinGame) {
+      DimensionInfo info = joinGame.getDimensionInfo();
+      return new ClientSpawn(joinGame.getDimension(), info == null ? null : info.getLevelName(),
+          info != null && info.isFlat(), info != null && info.isDebugType(), joinGame.getSeaLevel(),
+          joinGame.getIsHardcore());
+    }
+  }
+
+  public int clientEntityId() {
+    return clientEntityId;
+  }
+
+  public @Nullable ClientSpawn clientSpawn() {
+    return clientSpawn;
+  }
+
+  /**
+   * The client got a JoinGame: new level, new player entity.
+   */
+  public void onClientJoinGame(JoinGamePacket joinGame) {
+    clientEntityId = joinGame.getEntityId();
+    clientSpawn = ClientSpawn.of(joinGame);
+    clearClientWorld();
+  }
+
+  /**
+   * The client got a Respawn: always a new player entity (no effects), a new level when the
+   * dimension changed.
+   */
+  public void onClientRespawn(RespawnPacket respawn) {
+    effects.clear();
+    if (clientSpawn == null) {
+      return;
+    }
+    DimensionInfo info = respawn.getDimensionInfo();
+    ClientSpawn next = new ClientSpawn(respawn.getDimension(),
+        info == null ? null : info.getLevelName(), info != null && info.isFlat(),
+        info != null && info.isDebugType(), respawn.getSeaLevel(), clientSpawn.hardcore());
+    if (!Objects.equals(next.levelName(), clientSpawn.levelName())) {
+      chunks.clear();
+      entities.clear();
+    }
+    clientSpawn = next;
+  }
+
+  /**
+   * The client went to the configuration state, which drops its level.
+   */
+  public void onClientReconfigure() {
+    clientEntityId = Integer.MIN_VALUE;
+    clientSpawn = null;
+    clearClientWorld();
+  }
+
+  private int lastRemovedChunks;
+  private int lastRemovedEntities;
+
+  /**
+   * The proxy removed the old backend's chunks, entities, effects and waypoints from the client;
+   * entity id and spawn stay.
+   */
+  public void onSwitchWithoutJoinGame() {
+    lastRemovedChunks = chunks.size();
+    lastRemovedEntities = entities.size();
+    clearClientWorld();
+  }
+
+  public int lastRemovedChunks() {
+    return lastRemovedChunks;
+  }
+
+  public int lastRemovedEntities() {
+    return lastRemovedEntities;
+  }
+
+  private void clearClientWorld() {
+    chunks.clear();
+    entities.clear();
+    effects.clear();
+    waypoints.clear();
+  }
+
+  /**
+   * Peeks a play packet a backend sends to the client (packet id first, not consumed) and records
+   * chunks, entities, the player's effects and waypoints.
+   */
+  public void trackClientbound(ByteBuf packet, SeamlessPacketIds ids) {
+    ByteBuf buf = packet.duplicate();
+    try {
+      int id = ProtocolUtils.readVarInt(buf);
+      if (id == ids.levelChunkWithLight()) {
+        int x = buf.readInt();
+        int z = buf.readInt();
+        chunks.add(packChunk(x, z));
+      } else if (id == ids.forgetLevelChunk()) {
+        chunks.remove(buf.readLong());
+      } else if (id == ids.addEntity() || id == ids.addExperienceOrb()) {
+        int entityId = ProtocolUtils.readVarInt(buf);
+        if (entityId != clientEntityId) {
+          entities.add(entityId);
+        }
+      } else if (id == ids.removeEntities()) {
+        int count = ProtocolUtils.readVarInt(buf);
+        for (int i = 0; i < count; i++) {
+          entities.remove(ProtocolUtils.readVarInt(buf));
+        }
+      } else if (id == ids.updateMobEffect() || id == ids.removeMobEffect()) {
+        if (ProtocolUtils.readVarInt(buf) == clientEntityId) {
+          int effect = ProtocolUtils.readVarInt(buf);
+          if (id == ids.updateMobEffect()) {
+            effects.add(effect);
+          } else {
+            effects.remove(effect);
+          }
+        }
+      } else if (id == ids.trackedWaypoint()) {
+        int operation = ProtocolUtils.readVarInt(buf);
+        int start = buf.readerIndex();
+        if (buf.readBoolean()) {
+          buf.skipBytes(16); // uuid
+        } else {
+          buf.skipBytes(ProtocolUtils.readVarInt(buf)); // string
+        }
+        byte[] key = new byte[buf.readerIndex() - start];
+        buf.getBytes(start, key);
+        if (operation == WAYPOINT_UNTRACK) {
+          waypoints.remove(ByteBuffer.wrap(key));
+        } else {
+          byte[] waypoint = new byte[buf.writerIndex() - start];
+          buf.getBytes(start, waypoint);
+          waypoints.put(ByteBuffer.wrap(key), waypoint);
+        }
+      }
+    } catch (IndexOutOfBoundsException | IllegalArgumentException e) {
+      // A packet we cannot read is not tracked; a switch then leaves a little behind at worst.
+    }
+  }
+
+  static final int WAYPOINT_UNTRACK = 1;
+
+  static long packChunk(int x, int z) {
+    return x & 0xFFFFFFFFL | (z & 0xFFFFFFFFL) << 32;
+  }
+
+  public LongOpenHashSet chunks() {
+    return chunks;
+  }
+
+  public IntOpenHashSet entities() {
+    return entities;
+  }
+
+  public IntOpenHashSet effects() {
+    return effects;
+  }
+
+  public Map<ByteBuffer, byte[]> waypoints() {
+    return waypoints;
   }
 
   /**

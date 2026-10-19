@@ -149,6 +149,10 @@ public class RespawnPacket implements MinecraftPacket {
     return seaLevel;
   }
 
+  public DimensionInfo getDimensionInfo() {
+    return dimensionInfo;
+  }
+
   public void setSeaLevel(int seaLevel) {
     this.seaLevel = seaLevel;
   }

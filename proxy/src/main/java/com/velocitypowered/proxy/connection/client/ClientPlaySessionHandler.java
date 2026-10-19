@@ -41,6 +41,7 @@ import com.velocitypowered.proxy.connection.backend.VelocityServerConnection;
 import com.velocitypowered.proxy.connection.forge.legacy.LegacyForgeConstants;
 import com.velocitypowered.proxy.connection.player.resourcepack.ResourcePackResponseBundle;
 import com.velocitypowered.proxy.protocol.MinecraftPacket;
+import com.velocitypowered.proxy.protocol.ProtocolUtils;
 import com.velocitypowered.proxy.protocol.StateRegistry;
 import com.velocitypowered.proxy.protocol.netty.MinecraftDecoder;
 import com.velocitypowered.proxy.protocol.packet.BossBarPacket;
@@ -82,6 +83,8 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.util.ReferenceCountUtil;
+import it.unimi.dsi.fastutil.ints.IntIterator;
+import it.unimi.dsi.fastutil.longs.LongIterator;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -630,6 +633,7 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
       }
     }
 
+    player.seamlessSwitch().onClientReconfigure();
     player.switchToConfigState();
 
     return configSwitchFuture;
@@ -669,6 +673,7 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
     player.clearPlayerListHeaderAndFooterSilent();
     player.getTabList().clearAllSilent();
     player.getBossBarManager().dropPackets();
+    player.seamlessSwitch().onClientReconfigure();
     player.switchToConfigState();
     return configSwitchFuture;
   }
@@ -709,6 +714,7 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
       // JoinGame.
       spawned = true;
       player.getConnection().delayedWrite(joinGame);
+      player.seamlessSwitch().onClientJoinGame(joinGame);
       // Required for Legacy Forge
       player.getPhase().onFirstJoin(player);
     } else {
@@ -720,10 +726,17 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
 
       // The player is switching from a server already, so we need to tell the client to change
       // entity IDs and send new dimension information.
-      if (player.getConnection().getType() == ConnectionTypes.LEGACY_FORGE) {
-        this.doSafeClientServerSwitch(joinGame);
+      final SeamlessPacketIds noLoadingScreenIds = seamlessDeferred != null
+          ? noLoadingScreenIds(joinGame, destination) : null;
+      if (noLoadingScreenIds != null) {
+        this.doSwitchWithoutLoadingScreen(joinGame, destination, noLoadingScreenIds);
       } else {
-        this.doFastClientServerSwitch(joinGame);
+        if (player.getConnection().getType() == ConnectionTypes.LEGACY_FORGE) {
+          this.doSafeClientServerSwitch(joinGame);
+        } else {
+          this.doFastClientServerSwitch(joinGame);
+        }
+        player.seamlessSwitch().onClientJoinGame(joinGame);
       }
     }
 
@@ -783,6 +796,141 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
     player.getConnection().flush();
     serverMc.flush();
     destination.completeJoin();
+  }
+
+  /**
+   * Srino: the packet ids for a switch without JoinGame, null when the client has to get the
+   * JoinGame (feature off, client version unknown, other entity id or other dimension).
+   */
+  private @Nullable SeamlessPacketIds noLoadingScreenIds(JoinGamePacket joinGame,
+      VelocityServerConnection destination) {
+    if (!server.getConfiguration().isSeamlessNoLoadingScreen()) {
+      return null;
+    }
+    final SeamlessPacketIds ids = SeamlessPacketIds.forVersion(player.getProtocolVersion());
+    final SeamlessSwitchState state = player.seamlessSwitch();
+    final String blocker;
+    if (ids == null) {
+      blocker = "client version";
+    } else if (state.clientEntityId() != joinGame.getEntityId()) {
+      blocker = "entity id " + joinGame.getEntityId() + " != " + state.clientEntityId();
+    } else if (!SeamlessSwitchState.ClientSpawn.of(joinGame).equals(state.clientSpawn())) {
+      blocker = "other dimension";
+    } else {
+      return ids;
+    }
+    logger.info("[seamless] {} -> {}: loading screen ({})", player.getUsername(),
+        destination.getServerInfo().getName(), blocker);
+    return null;
+  }
+
+  /**
+   * Srino: switches without JoinGame and Respawn, which would both open the client's loading
+   * screen. The client keeps its level and player (same entity id on both backends), so this
+   * removes what the old backend left there; the new backend sends everything else (chunks,
+   * position, inventory, attributes, abilities, health, time, border, difficulty) on join.
+   * The client stops ticking its player while no chunk is loaded under it, so it waits in place
+   * until the new chunks arrive.
+   */
+  private void doSwitchWithoutLoadingScreen(JoinGamePacket joinGame,
+      VelocityServerConnection destination, SeamlessPacketIds ids) {
+    final SeamlessSwitchState state = player.seamlessSwitch();
+    final MinecraftConnection client = player.getConnection();
+    final int self = state.clientEntityId();
+
+    LongIterator chunks = state.chunks().iterator();
+    while (chunks.hasNext()) {
+      ByteBuf buf = rawPacket(client, ids.forgetLevelChunk());
+      buf.writeLong(chunks.nextLong());
+      client.delayedWrite(buf);
+    }
+    if (!state.entities().isEmpty()) {
+      ByteBuf buf = rawPacket(client, ids.removeEntities());
+      ProtocolUtils.writeVarInt(buf, state.entities().size());
+      IntIterator entities = state.entities().iterator();
+      while (entities.hasNext()) {
+        ProtocolUtils.writeVarInt(buf, entities.nextInt());
+      }
+      client.delayedWrite(buf);
+    }
+    IntIterator effects = state.effects().iterator();
+    while (effects.hasNext()) {
+      ByteBuf buf = rawPacket(client, ids.removeMobEffect());
+      ProtocolUtils.writeVarInt(buf, self);
+      ProtocolUtils.writeVarInt(buf, effects.nextInt());
+      client.delayedWrite(buf);
+    }
+    if (ids.trackedWaypoint() >= 0) {
+      for (byte[] waypoint : state.waypoints().values()) {
+        ByteBuf buf = rawPacket(client, ids.trackedWaypoint());
+        ProtocolUtils.writeVarInt(buf, SeamlessSwitchState.WAYPOINT_UNTRACK);
+        buf.writeBytes(waypoint);
+        client.delayedWrite(buf);
+      }
+    }
+    state.onSwitchWithoutJoinGame();
+
+    ByteBuf close = rawPacket(client, ids.containerClose());
+    ProtocolUtils.writeVarInt(close, 0);
+    client.delayedWrite(close);
+    ByteBuf stopSounds = rawPacket(client, ids.stopSound());
+    stopSounds.writeByte(0);
+    client.delayedWrite(stopSounds);
+
+    // What JoinGame would have set; weather comes from the new backend only when it rains there.
+    gameEvent(client, ids, GAME_EVENT_STOP_RAINING, 0);
+    gameEvent(client, ids, GAME_EVENT_RAIN_LEVEL, 0);
+    gameEvent(client, ids, GAME_EVENT_THUNDER_LEVEL, 0);
+    gameEvent(client, ids, GAME_EVENT_CHANGE_GAME_MODE, joinGame.getGamemode());
+    gameEvent(client, ids, GAME_EVENT_IMMEDIATE_RESPAWN, joinGame.getShowRespawnScreen() ? 0 : 1);
+    gameEvent(client, ids, GAME_EVENT_LIMITED_CRAFTING, joinGame.getDoLimitedCrafting() ? 1 : 0);
+    ByteBuf debugInfo = rawPacket(client, ids.entityEvent());
+    debugInfo.writeInt(self);
+    debugInfo.writeByte(joinGame.isReducedDebugInfo() ? ENTITY_EVENT_REDUCED_DEBUG
+        : ENTITY_EVENT_FULL_DEBUG);
+    client.delayedWrite(debugInfo);
+    ByteBuf viewDistance = rawPacket(client, ids.setChunkCacheRadius());
+    ProtocolUtils.writeVarInt(viewDistance, joinGame.getViewDistance());
+    client.delayedWrite(viewDistance);
+    ByteBuf simulationDistance = rawPacket(client, ids.setSimulationDistance());
+    ProtocolUtils.writeVarInt(simulationDistance, joinGame.getSimulationDistance());
+    client.delayedWrite(simulationDistance);
+    ByteBuf camera = rawPacket(client, ids.setCamera());
+    ProtocolUtils.writeVarInt(camera, self);
+    client.delayedWrite(camera);
+
+    // The client never reloads its level, so it sends no PlayerLoaded; the backend waits for one.
+    destination.ensureConnected().delayedWrite(ServerboundPlayerLoadedPacket.INSTANCE);
+    if (!destination.isClientLoaded()) {
+      destination.setClientLoaded(true);
+      server.getEventManager().fireAndForget(new PlayerClientLoadedWorldEvent(player));
+    }
+    logger.info("[seamless] {} -> {}: no loading screen ({} chunks, {} entities removed)",
+        player.getUsername(), destination.getServerInfo().getName(), state.lastRemovedChunks(),
+        state.lastRemovedEntities());
+  }
+
+  private static final int GAME_EVENT_STOP_RAINING = 2;
+  private static final int GAME_EVENT_CHANGE_GAME_MODE = 3;
+  private static final int GAME_EVENT_RAIN_LEVEL = 7;
+  private static final int GAME_EVENT_THUNDER_LEVEL = 8;
+  private static final int GAME_EVENT_IMMEDIATE_RESPAWN = 11;
+  private static final int GAME_EVENT_LIMITED_CRAFTING = 12;
+  private static final int ENTITY_EVENT_REDUCED_DEBUG = 22;
+  private static final int ENTITY_EVENT_FULL_DEBUG = 23;
+
+  private static ByteBuf rawPacket(MinecraftConnection connection, int packetId) {
+    ByteBuf buf = connection.getChannel().alloc().buffer();
+    ProtocolUtils.writeVarInt(buf, packetId);
+    return buf;
+  }
+
+  private static void gameEvent(MinecraftConnection connection, SeamlessPacketIds ids, int event,
+      float param) {
+    ByteBuf buf = rawPacket(connection, ids.gameEvent());
+    buf.writeByte(event);
+    buf.writeFloat(param);
+    connection.delayedWrite(buf);
   }
 
   private void doFastClientServerSwitch(JoinGamePacket joinGame) {

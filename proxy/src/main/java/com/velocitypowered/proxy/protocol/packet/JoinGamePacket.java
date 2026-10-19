@@ -151,6 +151,10 @@ public class JoinGamePacket implements MinecraftPacket {
     return doLimitedCrafting;
   }
 
+  public boolean getShowRespawnScreen() {
+    return showRespawnScreen;
+  }
+
   public void setDoLimitedCrafting(boolean doLimitedCrafting) {
     this.doLimitedCrafting = doLimitedCrafting;
   }
