@@ -46,6 +46,7 @@ import com.velocitypowered.proxy.connection.player.resourcepack.VelocityResource
 import com.velocitypowered.proxy.connection.player.resourcepack.handler.ResourcePackHandler;
 import com.velocitypowered.proxy.connection.util.ConnectionMessages;
 import com.velocitypowered.proxy.protocol.MinecraftPacket;
+import com.velocitypowered.proxy.protocol.ProtocolUtils;
 import com.velocitypowered.proxy.protocol.StateRegistry;
 import com.velocitypowered.proxy.protocol.netty.MinecraftDecoder;
 import com.velocitypowered.proxy.protocol.netty.MinecraftVarintFrameDecoder;
@@ -111,6 +112,7 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
   private int packetsFlushed;
   // Srino: set when switches without loading screen are on and the client version is known
   private final @Nullable SeamlessPacketIds seamlessIds;
+  private final int respawnId;
 
   BackendPlaySessionHandler(VelocityServer server, VelocityServerConnection serverConn) {
     this.server = server;
@@ -129,6 +131,16 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
     this.seamlessIds = server.getConfiguration().isSeamlessServerSwitch()
         && server.getConfiguration().isSeamlessNoLoadingScreen()
         ? SeamlessPacketIds.forVersion(playerConnection.getProtocolVersion()) : null;
+    int respawn = -1;
+    if (this.seamlessIds != null) {
+      try {
+        respawn = StateRegistry.PLAY.getProtocolRegistry(ProtocolUtils.Direction.CLIENTBOUND,
+            playerConnection.getProtocolVersion()).getPacketId(new RespawnPacket());
+      } catch (IllegalArgumentException e) {
+        respawn = -1;
+      }
+    }
+    this.respawnId = respawn;
   }
 
   @Override
@@ -517,6 +529,11 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
   @Override
   public void handleUnknown(ByteBuf buf) {
     if (seamlessIds != null) {
+      // Srino: Respawn is encode-only in the registry, so a backend's Respawn arrives here raw
+      if (respawnId >= 0 && ProtocolUtils.readVarInt(buf.duplicate()) == respawnId
+          && seamlessRespawn(buf)) {
+        return;
+      }
       serverConn.getPlayer().seamlessSwitch().trackClientbound(buf, seamlessIds);
     }
     boolean huge = buf.readableBytes() > LARGE_PACKET_THRESHOLD;
@@ -525,6 +542,26 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
       playerConnection.flush();
       packetsFlushed = 0;
     }
+  }
+
+  /**
+   * Srino: a backend's raw Respawn. True when the client must not get it (world change without
+   * the loading screen); otherwise the client's spawn follows it.
+   */
+  private boolean seamlessRespawn(ByteBuf raw) {
+    final RespawnPacket respawn = new RespawnPacket();
+    try {
+      ByteBuf buf = raw.duplicate();
+      ProtocolUtils.readVarInt(buf);
+      respawn.decode(buf, ProtocolUtils.Direction.CLIENTBOUND, playerConnection.getProtocolVersion());
+    } catch (RuntimeException e) {
+      return false;
+    }
+    if (playerSessionHandler.handleBackendWorldChange(respawn, serverConn)) {
+      return true;
+    }
+    serverConn.getPlayer().seamlessSwitch().onClientRespawn(respawn);
+    return false;
   }
 
   @Override

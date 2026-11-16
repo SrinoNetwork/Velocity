@@ -849,8 +849,12 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
     final SeamlessPacketIds ids = SeamlessPacketIds.forVersion(player.getProtocolVersion());
     final SeamlessSwitchState state = player.seamlessSwitch();
     final SeamlessSwitchState.ClientSpawn spawn = state.clientSpawn();
-    if (ids == null || spawn == null
-        || !SeamlessSwitchState.ClientSpawn.of(respawn, spawn.hardcore()).sameType(spawn)) {
+    final SeamlessSwitchState.ClientSpawn next = spawn == null ? null
+        : SeamlessSwitchState.ClientSpawn.of(respawn, spawn.hardcore());
+    if (ids == null || next == null || !next.sameType(spawn)) {
+      logger.info("[seamless] {} on {}: world change with loading screen ({})",
+          player.getUsername(), from.getServerInfo().getName(),
+          ids == null ? "client version" : next + " vs " + spawn);
       return false;
     }
     final MinecraftConnection client = player.getConnection();
