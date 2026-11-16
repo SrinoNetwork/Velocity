@@ -200,6 +200,9 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
 
   @Override
   public boolean handle(RespawnPacket packet) {
+    if (seamlessIds != null && playerSessionHandler.handleBackendWorldChange(packet, serverConn)) {
+      return true; // Srino: the client keeps its level, no loading screen
+    }
     serverConn.getPlayer().seamlessSwitch().onClientRespawn(packet);
     return false; // forward
   }

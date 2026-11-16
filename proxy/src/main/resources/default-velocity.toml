@@ -171,6 +171,12 @@ seamless-server-switch = false
 # stable-player-entity-ids) and the same dimension; otherwise the normal switch runs.
 seamless-no-loading-screen = false
 
+# Srino: on top of seamless-no-loading-screen, worlds of the same dimension type count as one:
+# a switch into another world name (e.g. a per player world) skips the loading screen too, and a
+# backend's own world change (teleport into another world, not a death respawn) becomes the same
+# cleanup instead of a Respawn. The client keeps the first world's name (F3, compass target).
+seamless-same-type-worlds = false
+
 # Enables support for SO_REUSEPORT. This may help the proxy scale better on multicore systems
 # with a lot of incoming connections, and provide better CPU utilization than the existing
 # strategy of having a single thread accepting connections and distributing them to worker

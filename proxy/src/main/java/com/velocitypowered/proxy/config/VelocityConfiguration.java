@@ -449,6 +449,10 @@ public class VelocityConfiguration implements ProxyConfig {
     return advanced.isSeamlessNoLoadingScreen();
   }
 
+  public boolean isSeamlessSameTypeWorlds() {
+    return advanced.isSeamlessSameTypeWorlds();
+  }
+
   public boolean isAcceptTransfers() {
     return this.advanced.isAcceptTransfers();
   }
@@ -790,6 +794,8 @@ public class VelocityConfiguration implements ProxyConfig {
     @Expose
     private boolean seamlessNoLoadingScreen = false;
     @Expose
+    private boolean seamlessSameTypeWorlds = false;
+    @Expose
     private boolean enableReusePort = false;
     @Expose
     private int commandRateLimit = 50;
@@ -828,6 +834,7 @@ public class VelocityConfiguration implements ProxyConfig {
         this.acceptTransfers = config.getOrElse("accepts-transfers", false);
         this.seamlessServerSwitch = config.getOrElse("seamless-server-switch", false);
         this.seamlessNoLoadingScreen = config.getOrElse("seamless-no-loading-screen", false);
+        this.seamlessSameTypeWorlds = config.getOrElse("seamless-same-type-worlds", false);
         this.enableReusePort = config.getOrElse("enable-reuse-port", false);
         this.commandRateLimit = config.getIntOrElse("command-rate-limit", 25);
         this.forwardCommandsIfRateLimited = config.getOrElse("forward-commands-if-rate-limited", true);
@@ -905,6 +912,10 @@ public class VelocityConfiguration implements ProxyConfig {
       return seamlessNoLoadingScreen;
     }
 
+    public boolean isSeamlessSameTypeWorlds() {
+      return seamlessSameTypeWorlds;
+    }
+
     public boolean isEnableReusePort() {
       return enableReusePort;
     }
@@ -948,6 +959,7 @@ public class VelocityConfiguration implements ProxyConfig {
           + ", acceptTransfers=" + acceptTransfers
           + ", seamlessServerSwitch=" + seamlessServerSwitch
           + ", seamlessNoLoadingScreen=" + seamlessNoLoadingScreen
+          + ", seamlessSameTypeWorlds=" + seamlessSameTypeWorlds
           + ", enableReusePort=" + enableReusePort
           + '}';
     }

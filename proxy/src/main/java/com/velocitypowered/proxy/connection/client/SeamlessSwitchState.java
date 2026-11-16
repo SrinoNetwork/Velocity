@@ -176,6 +176,22 @@ public final class SeamlessSwitchState {
           info != null && info.isFlat(), info != null && info.isDebugType(), joinGame.getSeaLevel(),
           joinGame.getIsHardcore());
     }
+
+    static ClientSpawn of(RespawnPacket respawn, boolean hardcore) {
+      DimensionInfo info = respawn.getDimensionInfo();
+      return new ClientSpawn(respawn.getDimension(), info == null ? null : info.getLevelName(),
+          info != null && info.isFlat(), info != null && info.isDebugType(),
+          respawn.getSeaLevel(), hardcore);
+    }
+
+    /**
+     * Same world as far as the client can tell without the dimension key (sky, height, sea
+     * level, hardcore hearts).
+     */
+    public boolean sameType(@Nullable ClientSpawn other) {
+      return other != null && dimensionType == other.dimensionType && flat == other.flat
+          && debug == other.debug && seaLevel == other.seaLevel && hardcore == other.hardcore;
+    }
   }
 
   public int clientEntityId() {
@@ -204,10 +220,7 @@ public final class SeamlessSwitchState {
     if (clientSpawn == null) {
       return;
     }
-    DimensionInfo info = respawn.getDimensionInfo();
-    ClientSpawn next = new ClientSpawn(respawn.getDimension(),
-        info == null ? null : info.getLevelName(), info != null && info.isFlat(),
-        info != null && info.isDebugType(), respawn.getSeaLevel(), clientSpawn.hardcore());
+    ClientSpawn next = ClientSpawn.of(respawn, clientSpawn.hardcore());
     if (!Objects.equals(next.levelName(), clientSpawn.levelName())) {
       chunks.clear();
       entities.clear();
@@ -231,10 +244,15 @@ public final class SeamlessSwitchState {
    * The proxy removed the old backend's chunks, entities, effects and waypoints from the client;
    * entity id and spawn stay.
    */
-  public void onSwitchWithoutJoinGame() {
+  public void onSwitchWithoutJoinGame(boolean effectsToo) {
     lastRemovedChunks = chunks.size();
     lastRemovedEntities = entities.size();
-    clearClientWorld();
+    chunks.clear();
+    entities.clear();
+    waypoints.clear();
+    if (effectsToo) {
+      effects.clear();
+    }
   }
 
   public int lastRemovedChunks() {

@@ -814,7 +814,7 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
       blocker = "client version";
     } else if (state.clientEntityId() != joinGame.getEntityId()) {
       blocker = "entity id " + joinGame.getEntityId() + " != " + state.clientEntityId();
-    } else if (!SeamlessSwitchState.ClientSpawn.of(joinGame).equals(state.clientSpawn())) {
+    } else if (!sameSpawn(SeamlessSwitchState.ClientSpawn.of(joinGame), state.clientSpawn())) {
       blocker = "other dimension";
     } else {
       return ids;
@@ -822,6 +822,92 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
     logger.info("[seamless] {} -> {}: loading screen ({})", player.getUsername(),
         destination.getServerInfo().getName(), blocker);
     return null;
+  }
+
+  private boolean sameSpawn(SeamlessSwitchState.ClientSpawn next,
+      SeamlessSwitchState.@Nullable ClientSpawn client) {
+    return server.getConfiguration().isSeamlessSameTypeWorlds() ? next.sameType(client)
+        : next.equals(client);
+  }
+
+  /**
+   * Srino: a backend's own world change (teleport into another world of the same dimension type,
+   * attributes kept, so no death respawn) without the Respawn, which would open the client's
+   * loading screen. Removes the old world's chunks, entities and waypoints like a switch; the
+   * backend sends the new world's chunks, position, border, time and spawn right after.
+   *
+   * @return true when the Respawn must not reach the client
+   */
+  public boolean handleBackendWorldChange(RespawnPacket respawn,
+      VelocityServerConnection from) {
+    if (!server.getConfiguration().isSeamlessServerSwitch()
+        || !server.getConfiguration().isSeamlessNoLoadingScreen()
+        || !server.getConfiguration().isSeamlessSameTypeWorlds()
+        || (respawn.getDataToKeep() & 1) == 0) {
+      return false;
+    }
+    final SeamlessPacketIds ids = SeamlessPacketIds.forVersion(player.getProtocolVersion());
+    final SeamlessSwitchState state = player.seamlessSwitch();
+    final SeamlessSwitchState.ClientSpawn spawn = state.clientSpawn();
+    if (ids == null || spawn == null
+        || !SeamlessSwitchState.ClientSpawn.of(respawn, spawn.hardcore()).sameType(spawn)) {
+      return false;
+    }
+    final MinecraftConnection client = player.getConnection();
+    removeClientWorld(client, ids, state, false);
+    ByteBuf stopSounds = rawPacket(client, ids.stopSound());
+    stopSounds.writeByte(0);
+    client.delayedWrite(stopSounds);
+    gameEvent(client, ids, GAME_EVENT_STOP_RAINING, 0);
+    gameEvent(client, ids, GAME_EVENT_RAIN_LEVEL, 0);
+    gameEvent(client, ids, GAME_EVENT_THUNDER_LEVEL, 0);
+    gameEvent(client, ids, GAME_EVENT_CHANGE_GAME_MODE, respawn.getGamemode());
+    logger.info("[seamless] {} on {}: world change without loading screen ({} chunks, {} entities"
+            + " removed)", player.getUsername(), from.getServerInfo().getName(),
+        state.lastRemovedChunks(), state.lastRemovedEntities());
+    return true;
+  }
+
+  /**
+   * Srino: forget chunks, remove entities (and the player's effects), untrack waypoints the
+   * client got from the old world.
+   */
+  private void removeClientWorld(MinecraftConnection client, SeamlessPacketIds ids,
+      SeamlessSwitchState state, boolean effectsToo) {
+    final int self = state.clientEntityId();
+    LongIterator chunks = state.chunks().iterator();
+    while (chunks.hasNext()) {
+      ByteBuf buf = rawPacket(client, ids.forgetLevelChunk());
+      buf.writeLong(chunks.nextLong());
+      client.delayedWrite(buf);
+    }
+    if (!state.entities().isEmpty()) {
+      ByteBuf buf = rawPacket(client, ids.removeEntities());
+      ProtocolUtils.writeVarInt(buf, state.entities().size());
+      IntIterator entities = state.entities().iterator();
+      while (entities.hasNext()) {
+        ProtocolUtils.writeVarInt(buf, entities.nextInt());
+      }
+      client.delayedWrite(buf);
+    }
+    if (effectsToo) {
+      IntIterator effects = state.effects().iterator();
+      while (effects.hasNext()) {
+        ByteBuf buf = rawPacket(client, ids.removeMobEffect());
+        ProtocolUtils.writeVarInt(buf, self);
+        ProtocolUtils.writeVarInt(buf, effects.nextInt());
+        client.delayedWrite(buf);
+      }
+    }
+    if (ids.trackedWaypoint() >= 0) {
+      for (byte[] waypoint : state.waypoints().values()) {
+        ByteBuf buf = rawPacket(client, ids.trackedWaypoint());
+        ProtocolUtils.writeVarInt(buf, SeamlessSwitchState.WAYPOINT_UNTRACK);
+        buf.writeBytes(waypoint);
+        client.delayedWrite(buf);
+      }
+    }
+    state.onSwitchWithoutJoinGame(effectsToo);
   }
 
   /**
@@ -838,37 +924,7 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
     final MinecraftConnection client = player.getConnection();
     final int self = state.clientEntityId();
 
-    LongIterator chunks = state.chunks().iterator();
-    while (chunks.hasNext()) {
-      ByteBuf buf = rawPacket(client, ids.forgetLevelChunk());
-      buf.writeLong(chunks.nextLong());
-      client.delayedWrite(buf);
-    }
-    if (!state.entities().isEmpty()) {
-      ByteBuf buf = rawPacket(client, ids.removeEntities());
-      ProtocolUtils.writeVarInt(buf, state.entities().size());
-      IntIterator entities = state.entities().iterator();
-      while (entities.hasNext()) {
-        ProtocolUtils.writeVarInt(buf, entities.nextInt());
-      }
-      client.delayedWrite(buf);
-    }
-    IntIterator effects = state.effects().iterator();
-    while (effects.hasNext()) {
-      ByteBuf buf = rawPacket(client, ids.removeMobEffect());
-      ProtocolUtils.writeVarInt(buf, self);
-      ProtocolUtils.writeVarInt(buf, effects.nextInt());
-      client.delayedWrite(buf);
-    }
-    if (ids.trackedWaypoint() >= 0) {
-      for (byte[] waypoint : state.waypoints().values()) {
-        ByteBuf buf = rawPacket(client, ids.trackedWaypoint());
-        ProtocolUtils.writeVarInt(buf, SeamlessSwitchState.WAYPOINT_UNTRACK);
-        buf.writeBytes(waypoint);
-        client.delayedWrite(buf);
-      }
-    }
-    state.onSwitchWithoutJoinGame();
+    removeClientWorld(client, ids, state, true);
 
     ByteBuf close = rawPacket(client, ids.containerClose());
     ProtocolUtils.writeVarInt(close, 0);

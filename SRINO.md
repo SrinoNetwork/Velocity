@@ -43,3 +43,15 @@ dimension, `ClientPacketListener.startWaitingForNewLevel`), so a switch without 
   Minecraft version, older clients keep the loading screen.
 - Test: `srino/e2e/seamless-noscreen.mjs` (two local SparklySlimePaper 26.1.2 + PicoLimbo + mineflayer
   26.1 bot, 58/58 on 2026-10-19).
+
+### Same-type worlds (`seamless-same-type-worlds = true`, needs both options above)
+For networks where every backend world has the same dimension type (Border: spawn, main levels and per player
+worlds are all flat overworlds), the dimension key no longer blocks a switch without the loading screen.
+- Switch: only dimension type, flat, debug, sea level and hardcore have to match; the client keeps the first
+  world's key (F3 and compass targets show that one).
+- A backend's own world change (Respawn with attributes kept, i.e. a teleport into another world, never a death
+  respawn) into a world of the same type is not forwarded: the proxy forgets the old world's chunks, removes its
+  entities and waypoints, stops sounds and rain, sets the gamemode (`ClientPlaySessionHandler.handleBackendWorldChange`).
+  The backend sends the new world's chunks, position, border, time and spawn right after, like on a far teleport.
+- Backends need the same player entity id (srinocore `sessions.stableEntityIds` or SparklySlimePaper).
+- Measured with srinocore `demo/border-e2e` step `screens` (SEAMLESS=0 vs 1).
